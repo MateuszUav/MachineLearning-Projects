@@ -1,0 +1,58 @@
+import numpy as np
+import matplotlib.pyplot as plt
+
+t1 = ['P', 'St', 'Sc']
+state_idx = {'P': 0, 'St': 1, 'Sc': 2}
+
+# Transition matrix: rows = current state, columns = next predicted state
+wyst = np.array([[1, 1, 1], [1, 1, 1], [1, 1, 1]], dtype=float)
+
+# Opponent's fixed probability distribution [P, St, Sc]
+prob_op = np.array([0.5, 0.1, 0.4])
+
+# Counter-move: what to play to beat the predicted move
+counter = {'P': 'Sc', 'St': 'P', 'Sc': 'St'}
+
+# Payoff: +1 win, -1 loss, 0 draw
+def payoff(our, op):
+    if our == op:
+        return 0
+    if counter[op] == our:
+        return 1
+    return -1
+
+n = 10000
+state = np.random.choice(t1, p=prob_op)
+stankasy = 0
+kasa = []
+
+for i in range(n):
+    row = state_idx[state]
+
+    # Predict opponent's next move based on transition matrix
+    probs = wyst[row] / wyst[row].sum()
+    pred = np.random.choice(t1, p=probs)
+
+    # Choose our move to beat the prediction
+    our_move = counter[pred]
+
+    # Opponent plays according to their fixed distribution
+    op_akc = np.random.choice(t1, p=prob_op)
+
+    # Update score
+    stankasy += payoff(our_move, op_akc)
+    kasa.append(stankasy)
+
+    # Learn: increment transition count for observed move
+    wyst[row][state_idx[op_akc]] += 1
+
+    # Transition to new state
+    state = op_akc
+
+plt.plot(kasa)
+plt.xlabel('Round')
+plt.ylabel('Cumulative score (bankroll)')
+plt.title('Rock, Paper, Scissors — Markov chain learning')
+plt.axhline(0, color='gray', linewidth=0.8, linestyle='--')
+plt.tight_layout()
+plt.show()
