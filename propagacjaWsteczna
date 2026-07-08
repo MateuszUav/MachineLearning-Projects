@@ -1,0 +1,78 @@
+"""
+Neural network regression – Python translation of siec.m (Octave/MATLAB)
+Activation function: arctan  (instead of tanh from the original)
+Network operates on matrices using numpy only.
+Data: data/dane1.txt
+"""
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ── Data ──────────────────────────────────────────────────────────────────────
+data = np.loadtxt('data/dane8.txt')
+P = data[:, 0].reshape(1, -1)   # (1, N) – input
+T = data[:, 1].reshape(1, -1)   # (1, N) – target
+N = P.shape[1]
+
+# ── Network initialisation ────────────────────────────────────────────────────
+np.random.seed(42)
+S1 = 100                                   # hidden neurons
+
+W1 = np.random.rand(S1, 1) - 0.5          # (S1, 1)
+B1 = np.random.rand(S1, 1) - 0.5          # (S1, 1)
+W2 = np.random.rand(1, S1) - 0.5          # (1, S1)
+B2 = np.random.rand(1, 1)  - 0.5          # (1, 1)
+lr = 0.001
+
+# ── Activation: arctan  f(z)=atan(z),  f'(z)=1/(1+z²) ───────────────────────
+def act(z):
+    return np.arctan(z)
+
+def act_deriv(z):
+    return 1.0 / (1.0 + z ** 2)
+
+# ── Training ──────────────────────────────────────────────────────────────────
+ones_N = np.ones((N, 1))   # (N, 1) – used for bias updates
+
+for epoch in range(1, 101):
+    # Forward pass
+    Z1 = W1 @ P + B1 @ np.ones((1, N))   # (S1, N)
+    A1 = act(Z1)                           # (S1, N)
+    A2 = W2 @ A1 + B2                     # (1,  N)
+
+    # Error signals (backprop)
+    E2 = T - A2         # (1,  N)
+    E1 = W2.T @ E2      # (S1, N)
+
+    # Gradients
+    D1 = act_deriv(Z1)  # (S1, N)  – arctan derivative at pre-activation values
+
+    dW2 = lr * (E2 @ A1.T)          # (1,  S1)
+    dB2 = lr * (E2 @ ones_N)        # (1,  1)
+    dW1 = lr * (D1 * E1) @ P.T     # (S1, 1)
+    dB1 = lr * (D1 * E1) @ ones_N  # (S1, 1)
+
+    W2 += dW2;  B2 += dB2
+    W1 += dW1;  B1 += dB1
+
+    if epoch % 10 == 0:
+        print(f"Epoch {epoch:3d}  MSE = {np.mean(E2 ** 2):.6f}")
+
+# ── Plot ──────────────────────────────────────────────────────────────────────
+idx = np.argsort(P.flatten())
+P_s  = P.flatten()[idx]
+T_s  = T.flatten()[idx]
+A2_s = A2.flatten()[idx]
+
+plt.figure(figsize=(9, 5))
+plt.plot(P_s, T_s,  'r*', label='Data (dane1.txt)')
+plt.plot(P_s, A2_s, 'b-', lw=2, label='Network output (arctan)')
+plt.xlabel('P')
+plt.ylabel('T')
+plt.title('Neural Network Regression – arctan activation')
+plt.legend()
+plt.grid(True)
+plt.tight_layout()
+plt.savefig('result.png', dpi=120)
+plt.show()
+print("Plot saved → result.png")
