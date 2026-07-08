@@ -1,0 +1,91 @@
+import numpy as np
+import matplotlib.pyplot as plt
+from tensorflow import keras
+from sklearn.model_selection import train_test_split
+
+# 1. Load CIFAR-10 and merge into one pool
+(x_train_raw, y_train_raw), (x_test_raw, y_test_raw) = keras.datasets.cifar10.load_data()
+
+x_all = np.concatenate([x_train_raw, x_test_raw])           # (60000, 32, 32, 3)
+y_all = np.concatenate([y_train_raw, y_test_raw]).flatten()  # (60000,)
+
+# 2. Convert labels: animals=1, vehicles=0
+# CIFAR-10: 0=plane,1=car,2=bird,3=cat,4=deer,5=dog,6=frog,7=horse,8=ship,9=truck
+ANIMALS = {2, 3, 4, 5, 6, 7}
+y_binary = keras.utils.to_categorical(
+    [1 if c in ANIMALS else 0 for c in y_all], num_classes=2
+)
+
+# 3. Split 3:7 (train:test) → 30% train, 70% test
+# dwa wyjscia i softmax. maja byc dwa wyjscia i categorical 
+x_all = x_all.astype("float32") / 255.0
+x_train, x_test, y_train, y_test = train_test_split(
+    x_all, y_binary, test_size=0.7, random_state=42, stratify=y_binary
+)
+print(f"Train: {len(x_train)}  Test: {len(x_test)}")
+
+# Helper: compile, train, evaluate
+def run(model, name, epochs=10):
+    model.compile(optimizer="adam", loss="categorical_crossentropy", metrics=["accuracy"])
+    history = model.fit(x_train, y_train, epochs=epochs, batch_size=64,
+                        validation_split=0.1, verbose=0)
+    _, acc = model.evaluate(x_test, y_test, verbose=0)
+    print(f"{name}  →  test accuracy: {acc:.4f}")
+    return history, acc
+
+# 4. Three classifiers
+def model_1conv():
+    return keras.Sequential([
+        keras.layers.Conv2D(32, 3, activation="relu", padding="same", input_shape=(32, 32, 3)),
+        keras.layers.MaxPooling2D(),
+        keras.layers.Flatten(),
+        keras.layers.Dense(128, activation="relu"),
+        keras.layers.Dense(2, activation="softmax"),
+    ])
+
+def model_2conv():
+    return keras.Sequential([
+        keras.layers.Conv2D(32, 3, activation="relu", padding="same", input_shape=(32, 32, 3)),
+        keras.layers.MaxPooling2D(),
+        keras.layers.Conv2D(64, 3, activation="relu", padding="same"),
+        keras.layers.MaxPooling2D(),
+        keras.layers.Flatten(),
+        keras.layers.Dense(128, activation="relu"),
+        keras.layers.Dense(2, activation="softmax"),
+    ])
+
+def model_3conv():
+    return keras.Sequential([
+        keras.layers.Conv2D(32, 3, activation="relu", padding="same", input_shape=(32, 32, 3)),
+        keras.layers.MaxPooling2D(),
+        keras.layers.Conv2D(64, 3, activation="relu", padding="same"),
+        keras.layers.MaxPooling2D(),
+        keras.layers.Conv2D(128, 3, activation="relu", padding="same"),
+        keras.layers.MaxPooling2D(),
+        keras.layers.Flatten(),
+        keras.layers.Dense(128, activation="relu"),
+        keras.layers.Dense(2, activation="softmax"),
+    ])
+
+EPOCHS = 10
+h1, acc1 = run(model_1conv(), "1-conv", EPOCHS)
+h2, acc2 = run(model_2conv(), "2-conv", EPOCHS)
+h3, acc3 = run(model_3conv(), "3-conv", EPOCHS)
+
+# 5. Plot validation accuracy comparison
+plt.figure(figsize=(8, 5))
+for h, label in [(h1, "1-conv"), (h2, "2-conv"), (h3, "3-conv")]:
+    plt.plot(h.history["val_accuracy"], label=label)
+plt.title("Validation accuracy over epochs")
+plt.xlabel("Epoch")
+plt.ylabel("Accuracy")
+plt.legend()
+plt.tight_layout()
+plt.savefig("comparison.png", dpi=150)
+plt.show()
+
+# 6. Summary
+results = {"1-conv": acc1, "2-conv": acc2, "3-conv": acc3}
+best = max(results, key=results.get)
+print(f"\nBest model: {best}  (accuracy {results[best]:.4f})")
+print("More conv layers capture richer spatial features — 3-conv typically generalises best.")
