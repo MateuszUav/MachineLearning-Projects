@@ -1,0 +1,413 @@
+import sys
+# Remove cwd from path so stdlib 'code' isn't shadowed by code.py
+sys.path = [p for p in sys.path if p not in ("", ".")]
+
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+from sklearn.preprocessing import MinMaxScaler
+from sklearn.metrics import mean_squared_error, mean_absolute_error, r2_score
+import torch
+import torch.nn as nn
+from torch.utils.data import DataLoader, TensorDataset
+import warnings
+
+warnings.filterwarnings("ignore")
+np.random.seed(42)
+torch.manual_seed(42)
+
+DEVICE = torch.device("cpu")
+
+# ============================================================
+# 1. DATASET
+# ============================================================
+print("=" * 60)
+print("1. DATASET")
+print("=" * 60)
+
+# data.txt: 2110 rows x 4 columns
+#   col 0 – y_t  (current close price)
+#   col 1 – y_{t-1}, col 2 – y_{t-2}, col 3 – y_{t-3}
+# The company is represented by this historical price series.
+
+data = np.loadtxt("data.txt")
+prices = data[:, 0]          # full price time series (2110 points)
+N = len(prices)
+
+print(f"Observations : {N}")
+print(f"Price range  : [{prices.min():.4f}, {prices.max():.4f}]")
+print(f"Mean / Std   : {prices.mean():.4f} / {prices.std():.4f}")
+
+plt.figure(figsize=(12, 4))
+plt.plot(prices)
+plt.title("Stock Price Time Series")
+plt.xlabel("Day")
+plt.ylabel("Price")
+plt.tight_layout()
+plt.savefig("1_price_series.png", dpi=100)
+print("Saved: 1_price_series.png")
+
+# ============================================================
+# 2. AR MODEL  (linear least-squares)
+# ============================================================
+print("\n" + "=" * 60)
+print("2. LINEAR AUTOREGRESSIVE (AR) MODEL")
+print("=" * 60)
+
+TRAIN_RATIO = 0.80
+TRAIN_END = int(TRAIN_RATIO * N)
+
+
+def build_ar_dataset(prices, p):
+    """Return (X, y) where X[i] = [y_{t-1}…y_{t-p}], y[i] = y_t."""
+    n = len(prices) - p
+    X = np.column_stack([prices[p - k - 1: n + p - k - 1] for k in range(p)])
+    y = prices[p:]
+    return X, y
+
+
+AR_ORDERS = [1, 3, 5, 10, 20, 50]
+ar_results = {}
+
+for p in AR_ORDERS:
+    X_all, y_all = build_ar_dataset(prices, p)
+    t = TRAIN_END - p          # training rows
+
+    X_tr, y_tr = X_all[:t], y_all[:t]
+    X_te, y_te = X_all[t:], y_all[t:]
+
+    # Add bias column
+    X_tr_b = np.c_[X_tr, np.ones(len(X_tr))]
+    X_te_b = np.c_[X_te, np.ones(len(X_te))]
+
+    coeffs, _, _, _ = np.linalg.lstsq(X_tr_b, y_tr, rcond=None)
+
+    y_hat_tr = X_tr_b @ coeffs
+    y_hat_te = X_te_b @ coeffs
+
+    mse_tr = mean_squared_error(y_tr, y_hat_tr)
+    mse_te = mean_squared_error(y_te, y_hat_te)
+    r2_te  = r2_score(y_te, y_hat_te)
+
+    ar_results[p] = dict(
+        coeffs=coeffs,
+        mse_tr=mse_tr, mse_te=mse_te,
+        rmse_te=np.sqrt(mse_te), r2_te=r2_te,
+        y_te=y_te, y_hat_te=y_hat_te,
+    )
+    print(f"AR({p:2d}): train MSE={mse_tr:.4f}  test MSE={mse_te:.4f}"
+          f"  RMSE={np.sqrt(mse_te):.4f}  R²={r2_te:.4f}")
+
+# Zero-cost baseline: y_{t+1} = y_t
+y_base_actual = prices[TRAIN_END + 1:]
+y_base_pred   = prices[TRAIN_END:-1]
+mse_base = mean_squared_error(y_base_actual, y_base_pred)
+r2_base  = r2_score(y_base_actual, y_base_pred)
+print(f"\nBaseline (y_{{t+1}}=y_t): test MSE={mse_base:.4f}"
+      f"  RMSE={np.sqrt(mse_base):.4f}  R²={r2_base:.4f}")
+
+best_p = min(ar_results, key=lambda p: ar_results[p]["mse_te"])
+print(f"\nBest AR order by test MSE: AR({best_p})")
+
+# Residual analysis
+residuals = ar_results[best_p]["y_te"] - ar_results[best_p]["y_hat_te"]
+
+
+def acf(x, nlags=40):
+    x = x - x.mean()
+    c = np.correlate(x, x, mode="full")
+    c = c[len(x) - 1:]
+    return c[:nlags + 1] / c[0]
+
+
+fig, axes = plt.subplots(1, 3, figsize=(15, 4))
+axes[0].plot(ar_results[best_p]["y_te"], label="Actual", alpha=0.7)
+axes[0].plot(ar_results[best_p]["y_hat_te"], label=f"AR({best_p})", alpha=0.7)
+axes[0].set_title(f"AR({best_p}) – Test Set")
+axes[0].legend()
+axes[1].plot(residuals)
+axes[1].axhline(0, color="r", linestyle="--")
+axes[1].set_title("Residuals")
+ci = 1.96 / np.sqrt(len(residuals))
+r_acf = acf(residuals)
+axes[2].stem(r_acf, markerfmt="C0o", linefmt="C0-", basefmt="k-")
+axes[2].axhline(ci, color="r", linestyle="--", label="95% CI")
+axes[2].axhline(-ci, color="r", linestyle="--")
+axes[2].set_title("ACF of Residuals")
+axes[2].legend()
+plt.tight_layout()
+plt.savefig("2_ar_model.png", dpi=100)
+print("Saved: 2_ar_model.png")
+
+plt.figure(figsize=(8, 4))
+orders = sorted(ar_results.keys())
+plt.plot(orders, [ar_results[p]["mse_te"] for p in orders], "o-", label="AR")
+plt.axhline(mse_base, color="r", linestyle="--", label="Baseline")
+plt.xlabel("AR order p")
+plt.ylabel("Test MSE")
+plt.title("AR Model: Test MSE vs Lag Order")
+plt.legend()
+plt.tight_layout()
+plt.savefig("2_ar_mse_vs_order.png", dpi=100)
+print("Saved: 2_ar_mse_vs_order.png")
+
+# ============================================================
+# 3. LSTM (univariate, price only)
+# ============================================================
+print("\n" + "=" * 60)
+print("3. RECURRENT NEURAL NETWORK – LSTM (univariate)")
+print("=" * 60)
+
+SEQ_LEN = 20
+
+scaler_price = MinMaxScaler()
+p_scaled = scaler_price.fit_transform(prices.reshape(-1, 1)).flatten()
+
+
+def make_sequences(data, seq_len):
+    X = np.array([data[i: i + seq_len] for i in range(len(data) - seq_len)])
+    y = data[seq_len:]
+    return X, y
+
+
+X_s, y_s = make_sequences(p_scaled, SEQ_LEN)
+split = int(TRAIN_RATIO * len(X_s))
+
+X_tr_s  = torch.tensor(X_s[:split],  dtype=torch.float32).unsqueeze(-1)
+y_tr_s  = torch.tensor(y_s[:split],  dtype=torch.float32).unsqueeze(-1)
+X_te_s  = torch.tensor(X_s[split:],  dtype=torch.float32).unsqueeze(-1)
+y_te_s  = torch.tensor(y_s[split:],  dtype=torch.float32).unsqueeze(-1)
+
+loader = DataLoader(TensorDataset(X_tr_s, y_tr_s), batch_size=32, shuffle=True)
+val_size = max(1, int(0.1 * split))
+val_loader = DataLoader(
+    TensorDataset(X_tr_s[-val_size:], y_tr_s[-val_size:]), batch_size=64
+)
+
+
+class LSTMModel(nn.Module):
+    def __init__(self, input_size, hidden1=64, hidden2=32, dropout=0.2):
+        super().__init__()
+        self.lstm1 = nn.LSTM(input_size, hidden1, batch_first=True)
+        self.drop1 = nn.Dropout(dropout)
+        self.lstm2 = nn.LSTM(hidden1, hidden2, batch_first=True)
+        self.drop2 = nn.Dropout(dropout)
+        self.fc    = nn.Linear(hidden2, 1)
+
+    def forward(self, x):
+        out, _ = self.lstm1(x)
+        out = self.drop1(out)
+        out, _ = self.lstm2(out)
+        out = self.drop2(out[:, -1, :])   # last timestep
+        return self.fc(out)
+
+
+def train_model(model, loader, val_loader, epochs=100, patience=10):
+    opt = torch.optim.Adam(model.parameters(), lr=1e-3)
+    criterion = nn.MSELoss()
+    best_val, best_state, wait = float("inf"), None, 0
+    train_hist, val_hist = [], []
+
+    for epoch in range(epochs):
+        model.train()
+        ep_loss = 0
+        for xb, yb in loader:
+            opt.zero_grad()
+            loss = criterion(model(xb), yb)
+            loss.backward()
+            opt.step()
+            ep_loss += loss.item() * len(xb)
+        train_hist.append(ep_loss / len(loader.dataset))
+
+        model.eval()
+        with torch.no_grad():
+            val_loss = sum(
+                criterion(model(xb), yb).item() * len(xb)
+                for xb, yb in val_loader
+            ) / len(val_loader.dataset)
+        val_hist.append(val_loss)
+
+        if val_loss < best_val:
+            best_val, best_state, wait = val_loss, {
+                k: v.clone() for k, v in model.state_dict().items()
+            }, 0
+        else:
+            wait += 1
+            if wait >= patience:
+                print(f"  Early stop at epoch {epoch + 1}")
+                break
+
+    model.load_state_dict(best_state)
+    return train_hist, val_hist
+
+
+model_uni = LSTMModel(input_size=1).to(DEVICE)
+print("Training univariate LSTM…")
+hist_tr_u, hist_val_u = train_model(model_uni, loader, val_loader)
+
+
+def predict(model, X_tensor):
+    model.eval()
+    with torch.no_grad():
+        return model(X_tensor).squeeze(-1).numpy()
+
+
+y_pred_tr_u  = predict(model_uni, X_tr_s)
+y_pred_te_u  = predict(model_uni, X_te_s)
+
+# Inverse-scale
+inv = lambda s: scaler_price.inverse_transform(s.reshape(-1, 1)).flatten()
+y_tr_orig = inv(y_tr_s.numpy().flatten())
+y_te_orig = inv(y_te_s.numpy().flatten())
+y_pred_tr_u_orig = inv(y_pred_tr_u)
+y_pred_te_u_orig = inv(y_pred_te_u)
+
+mse_te_u  = mean_squared_error(y_te_orig, y_pred_te_u_orig)
+r2_te_u   = r2_score(y_te_orig, y_pred_te_u_orig)
+print(f"LSTM (univariate): test MSE={mse_te_u:.4f}  RMSE={np.sqrt(mse_te_u):.4f}  R²={r2_te_u:.4f}")
+
+fig, axes = plt.subplots(1, 2, figsize=(13, 4))
+axes[0].plot(hist_tr_u, label="Train")
+axes[0].plot(hist_val_u, label="Val")
+axes[0].set_title("LSTM (univariate) – Training Loss")
+axes[0].set_xlabel("Epoch")
+axes[0].set_ylabel("MSE")
+axes[0].legend()
+axes[1].plot(y_te_orig, label="Actual", alpha=0.7)
+axes[1].plot(y_pred_te_u_orig, label="LSTM Predicted", alpha=0.7)
+axes[1].set_title("LSTM (univariate) – Test Predictions")
+axes[1].legend()
+plt.tight_layout()
+plt.savefig("3_lstm_univariate.png", dpi=100)
+print("Saved: 3_lstm_univariate.png")
+
+# ============================================================
+# 4. ADDITIONAL FEATURES + MULTIVARIATE LSTM + COMPARISON
+# ============================================================
+print("\n" + "=" * 60)
+print("4. ADDITIONAL FEATURES & MODEL COMPARISON")
+print("=" * 60)
+
+# Engineered features (additional data):
+#   returns_t      – daily log return
+#   ma5_t          – 5-day moving average
+#   ma20_t         – 20-day moving average
+#   volatility_t   – 10-day rolling std of returns
+
+df = pd.DataFrame({"price": prices})
+df["returns"]    = np.log(df["price"] / df["price"].shift(1))
+df["ma5"]        = df["price"].rolling(5).mean()
+df["ma20"]       = df["price"].rolling(20).mean()
+df["volatility"] = df["returns"].rolling(10).std()
+df = df.dropna().reset_index(drop=True)
+
+feat_cols = ["price", "returns", "ma5", "ma20", "volatility"]
+feats = df[feat_cols].values
+N_FEAT = feats.shape[1]
+
+scaler_multi = MinMaxScaler()
+feats_sc = scaler_multi.fit_transform(feats)
+
+
+def make_seq_multi(data, seq_len, target_col=0):
+    X = np.array([data[i: i + seq_len] for i in range(len(data) - seq_len)])
+    y = data[seq_len:, target_col]
+    return X, y
+
+
+X_m, y_m = make_seq_multi(feats_sc, SEQ_LEN)
+split_m = int(TRAIN_RATIO * len(X_m))
+
+X_tr_m  = torch.tensor(X_m[:split_m],  dtype=torch.float32)
+y_tr_m  = torch.tensor(y_m[:split_m],  dtype=torch.float32).unsqueeze(-1)
+X_te_m  = torch.tensor(X_m[split_m:],  dtype=torch.float32)
+y_te_m  = torch.tensor(y_m[split_m:],  dtype=torch.float32).unsqueeze(-1)
+
+loader_m = DataLoader(TensorDataset(X_tr_m, y_tr_m), batch_size=32, shuffle=True)
+val_m    = DataLoader(
+    TensorDataset(X_tr_m[-val_size:], y_tr_m[-val_size:]), batch_size=64
+)
+
+model_multi = LSTMModel(input_size=N_FEAT).to(DEVICE)
+print("Training multivariate LSTM…")
+hist_tr_m, hist_val_m = train_model(model_multi, loader_m, val_m)
+
+y_pred_te_m = predict(model_multi, X_te_m)
+
+# Inverse-scale using price column's min/max from scaler_multi
+p_min = scaler_multi.data_min_[0]
+p_max = scaler_multi.data_max_[0]
+inv_price = lambda s: s * (p_max - p_min) + p_min
+
+y_te_m_orig      = inv_price(y_te_m.numpy().flatten())
+y_pred_te_m_orig = inv_price(y_pred_te_m)
+
+mse_te_m  = mean_squared_error(y_te_m_orig, y_pred_te_m_orig)
+r2_te_m   = r2_score(y_te_m_orig, y_pred_te_m_orig)
+print(f"LSTM (multivariate): test MSE={mse_te_m:.4f}  RMSE={np.sqrt(mse_te_m):.4f}  R²={r2_te_m:.4f}")
+
+# ---- Final comparison table ----
+print("\n" + "=" * 62)
+print(f"{'MODEL':<28} {'MSE':>10} {'RMSE':>10} {'R²':>8}")
+print("-" * 62)
+print(f"{'Baseline (y_{t+1}=y_t)':<28} {mse_base:>10.4f} {np.sqrt(mse_base):>10.4f} {r2_base:>8.4f}")
+for p in sorted(ar_results.keys()):
+    r = ar_results[p]
+    print(f"{'AR('+str(p)+')':<28} {r['mse_te']:>10.4f} {r['rmse_te']:>10.4f} {r['r2_te']:>8.4f}")
+print(f"{'LSTM (univariate)':<28} {mse_te_u:>10.4f} {np.sqrt(mse_te_u):>10.4f} {r2_te_u:>8.4f}")
+print(f"{'LSTM (multivariate)':<28} {mse_te_m:>10.4f} {np.sqrt(mse_te_m):>10.4f} {r2_te_m:>8.4f}")
+print("=" * 62)
+
+# ---- Comparison plot ----
+n_plot = min(len(y_base_actual), len(y_pred_te_u_orig), len(y_pred_te_m_orig),
+             len(ar_results[best_p]["y_hat_te"]))
+
+fig, axes = plt.subplots(2, 2, figsize=(14, 8), sharex=False)
+ax = axes.flatten()
+
+ax[0].plot(y_base_actual[:n_plot], label="Actual", color="black", lw=1.5)
+ax[0].plot(y_base_pred[:n_plot], label="Baseline", alpha=0.7, linestyle="--")
+ax[0].set_title(f"Baseline  MSE={mse_base:.4f}")
+ax[0].legend()
+
+ax[1].plot(ar_results[best_p]["y_te"][:n_plot], label="Actual", color="black", lw=1.5)
+ax[1].plot(ar_results[best_p]["y_hat_te"][:n_plot], label=f"AR({best_p})", alpha=0.8)
+ax[1].set_title(f"AR({best_p})  MSE={ar_results[best_p]['mse_te']:.4f}")
+ax[1].legend()
+
+ax[2].plot(y_te_orig[:n_plot], label="Actual", color="black", lw=1.5)
+ax[2].plot(y_pred_te_u_orig[:n_plot], label="LSTM uni", alpha=0.8)
+ax[2].set_title(f"LSTM (univariate)  MSE={mse_te_u:.4f}")
+ax[2].legend()
+
+ax[3].plot(y_te_m_orig[:n_plot], label="Actual", color="black", lw=1.5)
+ax[3].plot(y_pred_te_m_orig[:n_plot], label="LSTM multi", alpha=0.8)
+ax[3].set_title(f"LSTM (multivariate)  MSE={mse_te_m:.4f}")
+ax[3].legend()
+
+for a in ax:
+    a.set_xlabel("Day")
+    a.set_ylabel("Price")
+
+plt.suptitle("Model Comparison – Test Set", fontsize=14)
+plt.tight_layout()
+plt.savefig("4_comparison.png", dpi=100)
+print("Saved: 4_comparison.png")
+
+# MSE bar chart
+models = (["Baseline"] + [f"AR({p})" for p in sorted(ar_results)]
+          + ["LSTM-uni", "LSTM-multi"])
+mses = ([mse_base] + [ar_results[p]["mse_te"] for p in sorted(ar_results)]
+        + [mse_te_u, mse_te_m])
+
+plt.figure(figsize=(10, 4))
+bars = plt.bar(models, mses, color=["red"] + ["steelblue"] * len(AR_ORDERS) + ["darkorange", "green"])
+plt.xticks(rotation=30, ha="right")
+plt.ylabel("Test MSE")
+plt.title("Model Comparison – Test MSE")
+plt.tight_layout()
+plt.savefig("4_mse_bar.png", dpi=100)
+print("Saved: 4_mse_bar.png")
+print("\nDone.")
